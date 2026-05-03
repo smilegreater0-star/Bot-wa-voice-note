@@ -12,6 +12,7 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const msgMemory = {};
 let currentQR = null;
 let isConnected = false;
+let botLidResolved = null; // LID bot yang diisi secara dinamis saat runtime
 
 // Web server QR
 const server = http.createServer(async (req, res) => {
@@ -118,7 +119,18 @@ async function startBot() {
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         const msg = messages[0];
-        if (!msg.message || msg.key.fromMe) return;
+        if (!msg.message) return;
+
+        // Pelajari LID bot dari pesan outgoing di grup (key.fromMe = true)
+        if (msg.key.fromMe && msg.key.remoteJid?.endsWith('@g.us') && !botLidResolved) {
+            const participant = msg.key.participant || '';
+            if (participant.includes('@lid')) {
+                botLidResolved = participant.split('@')[0].split(':')[0];
+                console.log(`✅ botLid resolved dari pesan outgoing: ${botLidResolved}`);
+            }
+        }
+
+        if (msg.key.fromMe) return;
 
         const sender = msg.key.remoteJid;
         const isGroup = sender.endsWith('@g.us');
@@ -132,22 +144,37 @@ async function startBot() {
         // Grup: balas kalau di-mention atau reply ke pesan bot
         if (isGroup) {
             const botNumber = sock.user?.id?.split(':')[0].split('@')[0];
-            const botLid = sock.user?.lid?.split(':')[0].split('@')[0];
+
+            // Resolve botLid secara dinamis — Baileys kadang tidak expose sock.user.lid
+            // Ambil dari sock.user.lid kalau ada, atau dari mentionedJid/@lid yang cocok nomor bot
+            if (!botLidResolved) {
+                const rawLid = sock.user?.lid;
+                if (rawLid) {
+                    botLidResolved = rawLid.split(':')[0].split('@')[0];
+                    console.log(`✅ botLid resolved dari sock.user.lid: ${botLidResolved}`);
+                }
+            }
+
             const ctxInfo = msg.message.extendedTextMessage?.contextInfo;
             const mentionedJids = ctxInfo?.mentionedJid || [];
+
+            // Kalau botLid belum resolve, coba deteksi dari mentionedJid @lid di pesan sebelumnya
+            // (tidak bisa dari pesan ini karena kita belum tahu LID-nya)
+
+            const botLid = botLidResolved;
 
             // Cek mention — bandingkan dengan nomor HP dan LID
             const isMentioned = mentionedJids.some(j => {
                 const stripped = j.split('@')[0].split(':')[0];
-                return stripped === botNumber || stripped === botLid;
+                return stripped === botNumber || (botLid && stripped === botLid);
             });
 
             // Cek reply ke pesan bot
             const quotedParticipant = ctxInfo?.participant || '';
             const qStripped = quotedParticipant.split('@')[0].split(':')[0];
-            const isReply = qStripped === botNumber || qStripped === botLid;
+            const isReply = qStripped === botNumber || (botLid && qStripped === botLid);
 
-            console.log(`Grup — botNum: ${botNumber}, botLid: ${botLid}, mentionedRaw: ${JSON.stringify(mentionedJids)}, isMentioned: ${isMentioned}, qParticipant: ${quotedParticipant}, isReply: ${isReply}`);
+            console.log(`Grup — botNum: ${botNumber}, botLid: ${botLid ?? 'belum resolve'}, mentionedRaw: ${JSON.stringify(mentionedJids)}, isMentioned: ${isMentioned}, qParticipant: ${quotedParticipant}, isReply: ${isReply}`);
             if (!isMentioned && !isReply) return;
         }
 
